@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Contactless Fever Screening Dashboard</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="/socket.io/socket.io.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="dashboard-container">
+        <header class="dashboard-header">
+            <h1 class="dashboard-title">
+                <i class="fas fa-thermometer-half"></i>
+                Contactless Fever Screening
+            </h1>
+            <p class="dashboard-subtitle">Real-time Temperature Monitoring Dashboard</p>
+            <div class="connection-status">
+                <span class="status-indicator" id="statusIndicator"></span>
+                <span id="connectionStatus">Connecting...</span>
+            </div>
+        </header>
+
+        <section class="summary-cards">
+            <div class="summary-card">
+                <div class="card-icon">
+                    <i class="fas fa-chart-line"></i>
+                </div>
+                <h3>Total Readings</h3>
+                <span class="card-value" id="totalReadings">0</span>
+            </div>
+            <div class="summary-card fever-card">
+                <div class="card-icon">
+                    <i class="fas fa-exclamation-triangle"></i>
+                </div>
+                <h3>Fever Alerts</h3>
+                <span class="card-value" id="feverCount">0</span>
+            </div>
+            <div class="summary-card temp-card">
+                <div class="card-icon">
+                    <i class="fas fa-thermometer-half"></i>
+                </div>
+                <h3>Avg Temperature</h3>
+                <span class="card-value" id="avgTemp">N/A</span>
+            </div>
+            <div class="summary-card time-card">
+                <div class="card-icon">
+                    <i class="fas fa-clock"></i>
+                </div>
+                <h3>Last Update</h3>
+                <span class="card-value" id="lastUpdate">-</span>
+            </div>
+        </section>
+
+        <section class="chart-section">
+            <div class="chart-container">
+                <h3><i class="fas fa-chart-area"></i> Temperature Trend</h3>
+                <canvas id="temperatureChart"></canvas>
+            </div>
+        </section>
+
+        <section class="main-content">
+            <div class="controls">
+                <button class="btn btn-primary" id="refreshBtn">
+                    <i class="fas fa-sync-alt"></i> Refresh
+                </button>
+                <button class="btn btn-secondary" id="clearBtn">
+                    <i class="fas fa-broom"></i> Clear Display
+                </button>
+                <div class="auto-refresh-status">
+                    <span class="status-indicator active"></span> 
+                    <span>Auto refresh every 6s</span>
+                    <span class="record-count" id="recordCount">0 records</span>
+                </div>
+            </div>
+
+            <div class="table-container">
+                <table class="data-table" id="recordsTable">
+                    <thead>
+                        <tr>
+                            <th><i class="fas fa-clock"></i> Time</th>
+                            <th><i class="fas fa-laptop-medical"></i> Device</th>
+                            <th><i class="fas fa-thermometer-half"></i> Temperature</th>
+                            <th><i class="fas fa-exclamation-triangle"></i> Status</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tableBody">
+                        <tr class="loading-row">
+                            <td colspan="5">
+                                <i class="fas fa-spinner fa-spin"></i> Loading data...
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Error Modal -->
+        <div class="error-modal" id="errorModal" style="display: none;">
+            <div class="error-content">
+                <i class="fas fa-exclamation-circle"></i>
+                <h3>Connection Error</h3>
+                <p id="errorMessage">Failed to load data. Please try again.</p>
+                <button class="btn btn-primary" onclick="hideErrorModal()">
+                    <i class="fas fa-times"></i> Close
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let refreshInterval;
+        let isLoading = false;
+        let temperatureChart;
+        const socket = io();
+        
+        // Socket connection handling
+        socket.on('connect', () => {
+            document.getElementById('connectionStatus').textContent = 'Connected';
+            document.getElementById('statusIndicator').className = 'status-indicator connected';
+        });
+        
+        socket.on('disconnect', () => {
+            document.getElementById('connectionStatus').textContent = 'Disconnected';
+            document.getElementById('statusIndicator').className = 'status-indicator disconnected';
+        });
+        
+        // Real-time updates
+        socket.on('new-reading', (reading) => {
+            addRowToTable(reading);
+            updateChart(reading);
+            fetchRecords(); // Refresh stats
+        });
+        
+        // Enhanced fetch function with better error handling
+        async function fetchRecords() {
+            if (isLoading) return;
+            isLoading = true;
+            
+            const refreshBtn = document.getElementById('refreshBtn');
+            const refreshIcon = refreshBtn.querySelector('i');
+            
+            // Update button state
+            refreshBtn.disabled = true;
+            refreshIcon.className = 'fas fa-spinner fa-spin';
+            
+            try {
+                const res = await fetch('/api/temps?limit=100');
+                
+                if (!res.ok) {
+                    throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+                }
+                
+                const data = await res.json();
+                
+                updateTable(data);
+                updateStats(data);
+                updateChartData(data);
+                hideErrorModal();
+                
+                // Update record count with animation
+                const recordCount = document.getElementById('recordCount');
+                recordCount.textContent = `${data.length} records`;
+                recordCount.classList.add('fade-in');
+                
+            } catch (err) {
+                console.error('Fetch error:', err);
+                showError(err.message);
+            } finally {
+                isLoading = false;
+                refreshBtn.disabled = false;
+                refreshIcon.className = 'fas fa-sync-alt';
+            }
+        }
+        
+        // Enhanced table update with animations
+        function updateTable(data) {
+            const tbody = document.getElementById('tableBody');
+            tbody.innerHTML = '';
+            
+            if (data.length === 0) {
+                tbody.innerHTML = `
+                    <tr class="loading-row">
+                        <td colspan="5">
+                            <i class="fas fa-info-circle"></i> No data available
+                        </td>
+                    </tr>
+                `;
+                return;
+            }
+            
+            data.forEach((record, index) => {
+                const tr = document.createElement('tr');
+                tr.style.animationDelay = `${index * 0.05}s`;
+                tr.classList.add('slide-up');
+                
+                // Format timestamp
+                let timeStr = '';
+                if (record.timestamp) {
+                    try {
+                        const date = new Date(record.timestamp);
+                        timeStr = date.toLocaleString('en-US', {
+                            month: 'short',
+                            day: 'numeric',
+                            hour: '2-digit',
+                            minute: '2-digit',
+                            second: '2-digit'
+                        });
+                    } catch (e) {
+                        timeStr = 'Unknown';
+                    }
+                }
+                
+                // Format temperature with better styling
+                let tempStr = '';
+                let tempClass = '';
+                if (record.tempC !== null && record.tempC !== undefined) {
+                    tempStr = record.tempC.toFixed(1) + '°C';
+                    tempClass = record.tempC >= 37.5 ? 'temp-high' : 'temp-normal';
+                }
+                
+                // Format status with icons
+                let statusClass = 'normal';
+                let statusIcon = 'fas fa-check-circle';
+                let statusText = record.status || 'normal';
+                
+                if (record.status === 'fever') {
+                    statusClass = 'fever';
+                    statusIcon = 'fas fa-exclamation-triangle';
+                } else if (record.status === 'warning') {
+                    statusClass = 'warning';
+                    statusIcon = 'fas fa-exclamation-circle';
+                }
+                
+                tr.innerHTML = `
+                    <td><i class="fas fa-clock" style="margin-right: 8px; color: #6a7c97;"></i>${timeStr}</td>
+                    <td><i class="fas fa-microchip" style="margin-right: 8px; color: #6a7c97;"></i>${record.deviceId || 'ESP32'}</td>
+                    <td class="temperature ${tempClass}">
+                        <i class="fas fa-thermometer-half" style="margin-right: 8px;"></i>${tempStr}
+                    </td>
+                    <td>
+                        <span class="${statusClass}">
+                            <i class="${statusIcon}"></i>${statusText}
+                        </span>
+                    </td>
+                `;
+                
+                tbody.appendChild(tr);
+            });
+        }
+        
+        // Add single row for real-time updates
+        function addRowToTable(record) {
+            const tbody = document.getElementById('tableBody');
+            const tr = document.createElement('tr');
+            tr.classList.add('slide-up', 'new-row');
+            
+            const timeStr = new Date(record.timestamp).toLocaleString('en-US', {
+                month: 'short',
+                day: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit'
+            });
+            
+            const tempStr = record.tempC ? record.tempC.toFixed(1) + '°C' : 'N/A';
+            const tempClass = record.tempC >= 37.5 ? 'temp-high' : 'temp-normal';
+            
+            let statusClass = 'normal';
+            let statusIcon = 'fas fa-check-circle';
+            if (record.status === 'fever') {
+                statusClass = 'fever';
+                statusIcon = 'fas fa-exclamation-triangle';
+            }
+            
+            tr.innerHTML = `
+                <td><i class="fas fa-clock" style="margin-right: 8px; color: #6a7c97;"></i>${timeStr}</td>
+                <td><i class="fas fa-microchip" style="margin-right: 8px; color: #6a7c97;"></i>${record.deviceId || 'ESP32'}</td>
+                <td class="temperature ${tempClass}">
+                    <i class="fas fa-thermometer-half" style="margin-right: 8px;"></i>${tempStr}
+                </td>
+                <td>
+                    <span class="${statusClass}">
+                        <i class="${statusIcon}"></i>${record.status || 'normal'}
+                    </span>
+                </td>
+            `;
+            
+            tbody.prepend(tr);
+            
+            // Keep only 50 rows
+            while (tbody.children.length > 50) {
+                tbody.removeChild(tbody.lastChild);
+            }
+            
+            // Remove new-row class after animation
+            setTimeout(() => tr.classList.remove('new-row'), 1000);
+        }
+        
+        // Enhanced stats update with animations
+        function updateStats(data) {
+            const totalReadings = data.length;
+            const feverCount = data.filter(r => r.status === 'fever').length;
+            
+            // Calculate average temperature
+            const validTemps = data.filter(r => r.tempC !== null && r.tempC !== undefined).map(r => r.tempC);
+            const avgTemp = validTemps.length > 0 
+                ? (validTemps.reduce((a, b) => a + b, 0) / validTemps.length).toFixed(1) + '°C'
+                : 'N/A';
+            
+            // Last update time
+            const lastUpdate = new Date().toLocaleTimeString('en-US', {
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit'
+            });
+            
+            // Animate counter updates
+            animateCounter('totalReadings', totalReadings);
+            animateCounter('feverCount', feverCount);
+            
+            document.getElementById('avgTemp').textContent = avgTemp;
+            document.getElementById('lastUpdate').textContent = lastUpdate;
+            
+            // Add visual feedback for fever alerts
+            const feverCard = document.querySelector('.fever-card');
+            if (feverCount > 0) {
+                feverCard.classList.add('alert-pulse');
+                setTimeout(() => feverCard.classList.remove('alert-pulse'), 3000);
+            }
+        }
+        
+        // Initialize chart
+        function initChart() {
+            const ctx = document.getElementById('temperatureChart').getContext('2d');
+            temperatureChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Temperature (°C)',
+                        data: [],
+                        borderColor: '#4f46e5',
+                        backgroundColor: 'rgba(79, 70, 229, 0.1)',
+                        borderWidth: 2,
+                        fill: true,
+                        tension: 0.4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            min: 35,
+                            max: 42,
+                            grid: {
+                                color: 'rgba(0, 0, 0, 0.1)'
+                            }
+                        },
+                        x: {
+                            grid: {
+                                color: 'rgba(0, 0, 0, 0.1)'
+                            }
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            display: false
+                        }
+                    }
+                }
+            });
+        }
+        
+        // Update chart with new data
+        function updateChartData(data) {
+            const labels = [];
+            const temperatures = [];
+            
+            data.slice(-20).forEach(record => {
+                if (record.tempC !== null && record.tempC !== undefined) {
+                    labels.push(new Date(record.timestamp).toLocaleTimeString());
+                    temperatures.push(record.tempC);
+                }
+            });
+            
+            temperatureChart.data.labels = labels;
+            temperatureChart.data.datasets[0].data = temperatures;
+            temperatureChart.update();
+        }
+        
+        // Update chart with single reading
+        function updateChart(record) {
+            if (record.tempC !== null && record.tempC !== undefined) {
+                const timeLabel = new Date(record.timestamp).toLocaleTimeString();
+                
+                temperatureChart.data.labels.push(timeLabel);
+                temperatureChart.data.datasets[0].data.push(record.tempC);
+                
+                // Keep only last 20 points
+                if (temperatureChart.data.labels.length > 20) {
+                    temperatureChart.data.labels.shift();
+                    temperatureChart.data.datasets[0].data.shift();
+                }
+                
+                temperatureChart.update();
+            }
+        }
+        
+        // Counter animation function
+        function animateCounter(elementId, targetValue) {
+            const element = document.getElementById(elementId);
+            const currentValue = parseInt(element.textContent) || 0;
+            const increment = targetValue > currentValue ? 1 : -1;
+            const duration = 500;
+            const steps = Math.abs(targetValue - currentValue);
+            const stepDuration = steps > 0 ? duration / steps : 0;
+            
+            if (steps === 0) return;
+            
+            let current = currentValue;
+            const timer = setInterval(() => {
+                current += increment;
+                element.textContent = current;
+                
+                if (current === targetValue) {
+                    clearInterval(timer);
+                }
+            }, stepDuration);
+        }
+        
+        // Enhanced error handling with modal
+        function showError(message) {
+            const tbody = document.getElementById('tableBody');
+            tbody.innerHTML = `
+                <tr class="error-row">
+                    <td colspan="5">
+                        <i class="fas fa-exclamation-circle"></i> ${message}
+                    </td>
+                </tr>
+            `;
+            
+            const errorModal = document.getElementById('errorModal');
+            const errorMessage = document.getElementById('errorMessage');
+            errorMessage.textContent = message;
+            errorModal.style.display = 'flex';
+        }
+        
+        // Hide error modal
+        function hideErrorModal() {
+            const errorModal = document.getElementById('errorModal');
+            errorModal.style.display = 'none';
+        }
+        
+        // Enhanced clear display function
+        function clearDisplay() {
+            const tbody = document.getElementById('tableBody');
+            tbody.innerHTML = `
+                <tr class="loading-row">
+                    <td colspan="5">
+                        <i class="fas fa-broom"></i> Display cleared - Click refresh to reload data
+                    </td>
+                </tr>
+            `;
+            
+            // Reset stats
+            animateCounter('totalReadings', 0);
+            animateCounter('feverCount', 0);
+            document.getElementById('avgTemp').textContent = 'N/A';
+            document.getElementById('recordCount').textContent = '0 records';
+            
+            // Clear chart
+            temperatureChart.data.labels = [];
+            temperatureChart.data.datasets[0].data = [];
+            temperatureChart.update();
+        }
+        
+        // Initialize dashboard
+        function initDashboard() {
+            // Initialize chart
+            initChart();
+            
+            // Add event listeners
+            document.getElementById('refreshBtn').addEventListener('click', fetchRecords);
+            document.getElementById('clearBtn').addEventListener('click', clearDisplay);
+            
+            // Close modal when clicking outside
+            document.getElementById('errorModal').addEventListener('click', (e) => {
+                if (e.target.id === 'errorModal') {
+                    hideErrorModal();
+                }
+            });
+            
+            // Keyboard shortcuts
+            document.addEventListener('keydown', (e) => {
+                if (e.ctrlKey && e.key === 'r') {
+                    e.preventDefault();
+                    fetchRecords();
+                }
+                if (e.key === 'Escape') {
+                    hideErrorModal();
+                }
+            });
+            
+            // Initial load
+            fetchRecords();
+            
+            // Set up auto-refresh
+            refreshInterval = setInterval(fetchRecords, 6000);
+            
+            console.log('🌡️ Fever Screening Dashboard initialized successfully!');
+        }
+        
+        // Cleanup function
+        function cleanup() {
+            if (refreshInterval) {
+                clearInterval(refreshInterval);
+            }
+        }
+        
+        // Initialize when DOM is loaded
+        document.addEventListener('DOMContentLoaded', initDashboard);
+        
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', cleanup);
+        
+        // Expose functions globally for onclick handlers
+        window.hideErrorModal = hideErrorModal;
+    </script>
+</body>
+</html>
