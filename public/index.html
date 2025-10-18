@@ -7,6 +7,7 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.0.0"></script>
     <script src="/socket.io/socket.io.js"></script>
     <link rel="stylesheet" href="style.css">
 </head>
@@ -29,7 +30,7 @@
                 <div class="card-icon">
                     <i class="fas fa-chart-line"></i>
                 </div>
-                <h3>Total Readings</h3>
+                <h3>Total Count</h3>
                 <span class="card-value" id="totalReadings">0</span>
             </div>
             <div class="summary-card fever-card">
@@ -62,14 +63,24 @@
             </div>
         </section>
 
+        <!-- Pie Chart Section -->
+        <section class="chart-section">
+            <div class="chart-container">
+                <h3><i class="fas fa-chart-pie"></i> Reading Distribution</h3>
+                <canvas id="statusChart"></canvas>
+            </div>
+        </section>
+
         <section class="main-content">
             <div class="controls">
-                <button class="btn btn-primary" id="refreshBtn">
-                    <i class="fas fa-sync-alt"></i> Refresh
-                </button>
-                <button class="btn btn-secondary" id="clearBtn">
-                    <i class="fas fa-broom"></i> Clear Display
-                </button>
+                <div class="filter-controls">
+                    <label for="statusFilter">Filter by Status:</label>
+                    <select id="statusFilter" class="filter-select">
+                        <option value="all">All</option>
+                        <option value="normal">Normal</option>
+                        <option value="fever">Fever</option>
+                    </select>
+                </div>
                 <div class="auto-refresh-status">
                     <span class="status-indicator active"></span> 
                     <span>Auto refresh every 6s</span>
@@ -85,6 +96,7 @@
                             <th><i class="fas fa-laptop-medical"></i> Device</th>
                             <th><i class="fas fa-thermometer-half"></i> Temperature</th>
                             <th><i class="fas fa-exclamation-triangle"></i> Status</th>
+                            <th><i class="fas fa-trash-alt"></i> Actions</th>
                         </tr>
                     </thead>
                     <tbody id="tableBody">
@@ -109,14 +121,42 @@
                 </button>
             </div>
         </div>
+
+        <!-- Delete Confirmation Modal -->
+        <div class="delete-modal" id="deleteModal" style="display: none;">
+            <div class="delete-modal-content">
+                <div class="delete-modal-header">
+                    <h3><i class="fas fa-exclamation-triangle"></i> Confirm Delete</h3>
+                </div>
+                <div class="delete-modal-body">
+                    <p>Are you sure you want to delete this temperature reading record?</p>
+                    <p class="delete-warning">This action cannot be undone.</p>
+                </div>
+                <div class="delete-modal-footer">
+                    <button class="btn btn-secondary" onclick="hideDeleteModal()">
+                        <i class="fas fa-times"></i> Cancel
+                    </button>
+                    <button class="btn btn-delete-confirm" onclick="confirmDelete()">
+                        <i class="fas fa-trash-alt"></i> Delete Record
+                    </button>
+                </div>
+            </div>
+        </div>
+
     </div>
 
     <script>
         let refreshInterval;
         let isLoading = false;
         let temperatureChart;
+        let statusChart;
+        let currentData = []; // Store current data for filtering
+        let recordToDelete = null; // Store the ID of the record to delete
         const socket = io();
         
+        // Register Chart.js datalabels plugin
+        Chart.register(ChartDataLabels);
+
         // Socket connection handling
         socket.on('connect', () => {
             document.getElementById('connectionStatus').textContent = 'Connected';
@@ -130,22 +170,38 @@
         
         // Real-time updates
         socket.on('new-reading', (reading) => {
-            addRowToTable(reading);
+            // Add to current data
+            currentData.unshift(reading); // Add to beginning since data is sorted newest first
+            
+            // Keep only last 100 records in memory
+            if (currentData.length > 100) {
+                currentData.pop();
+            }
+            
+            // Apply current filter for table update
+            const filterValue = document.getElementById('statusFilter').value;
+            const filteredData = filterData(currentData, filterValue);
+            
+            // Only add row to table if it matches the filter
+            if (filterValue === 'all' || (reading.status || 'normal') === filterValue) {
+                addRowToTable(reading);
+            }
+            
+            // Update charts and stats with ALL data (not filtered)
             updateChart(reading);
-            fetchRecords(); // Refresh stats
+            updateStats(currentData);
+            updateChartData(currentData);
+            showAlert(reading); // Show alert notification
+            
+            // Update record count with filtered data count
+            const recordCount = document.getElementById('recordCount');
+            recordCount.textContent = `${filteredData.length} records`;
         });
         
         // Enhanced fetch function with better error handling
         async function fetchRecords() {
             if (isLoading) return;
             isLoading = true;
-            
-            const refreshBtn = document.getElementById('refreshBtn');
-            const refreshIcon = refreshBtn.querySelector('i');
-            
-            // Update button state
-            refreshBtn.disabled = true;
-            refreshIcon.className = 'fas fa-spinner fa-spin';
             
             try {
                 const res = await fetch('/api/temps?limit=100');
@@ -155,15 +211,23 @@
                 }
                 
                 const data = await res.json();
+                currentData = data; // Store data for filtering
                 
-                updateTable(data);
+                // Apply current filter only to table data
+                const filterValue = document.getElementById('statusFilter').value;
+                const filteredData = filterData(data, filterValue);
+                
+                // Update table with filtered data
+                updateTable(filteredData);
+                
+                // Update stats and charts with ALL data (not filtered)
                 updateStats(data);
                 updateChartData(data);
                 hideErrorModal();
                 
-                // Update record count with animation
+                // Update record count with filtered data count
                 const recordCount = document.getElementById('recordCount');
-                recordCount.textContent = `${data.length} records`;
+                recordCount.textContent = `${filteredData.length} records`;
                 recordCount.classList.add('fade-in');
                 
             } catch (err) {
@@ -171,8 +235,6 @@
                 showError(err.message);
             } finally {
                 isLoading = false;
-                refreshBtn.disabled = false;
-                refreshIcon.className = 'fas fa-sync-alt';
             }
         }
         
@@ -192,6 +254,8 @@
                 return;
             }
             
+            // Data is already sorted newest first from the backend
+            // So we can directly iterate through it
             data.forEach((record, index) => {
                 const tr = document.createElement('tr');
                 tr.style.animationDelay = `${index * 0.05}s`;
@@ -246,6 +310,11 @@
                             <i class="${statusIcon}"></i>${statusText}
                         </span>
                     </td>
+                    <td>
+                        <button class="btn btn-delete" onclick="showDeleteModal('${record._id}')">
+                            <i class="fas fa-trash-alt"></i> Delete
+                        </button>
+                    </td>
                 `;
                 
                 tbody.appendChild(tr);
@@ -287,8 +356,13 @@
                         <i class="${statusIcon}"></i>${record.status || 'normal'}
                     </span>
                 </td>
+                <td>
+                    <button class="btn btn-delete" onclick="showDeleteModal('${record._id}')">
+                        <i class="fas fa-trash-alt"></i> Delete
+                    </button>
+                </td>
             `;
-            
+
             tbody.prepend(tr);
             
             // Keep only 50 rows
@@ -335,8 +409,9 @@
         
         // Initialize chart
         function initChart() {
-            const ctx = document.getElementById('temperatureChart').getContext('2d');
-            temperatureChart = new Chart(ctx, {
+            // Initialize line chart
+            const tempCtx = document.getElementById('temperatureChart').getContext('2d');
+            temperatureChart = new Chart(tempCtx, {
                 type: 'line',
                 data: {
                     labels: [],
@@ -374,6 +449,61 @@
                     }
                 }
             });
+            
+            // Initialize pie chart
+            const statusCtx = document.getElementById('statusChart').getContext('2d');
+            statusChart = new Chart(statusCtx, {
+                type: 'doughnut',
+                data: {
+                    labels: ['Normal', 'Fever'],
+                    datasets: [{
+                        data: [0, 0],
+                        backgroundColor: [
+                            '#10b981', // green for normal
+                            '#ef4444'  // red for fever
+                        ],
+                        borderColor: '#ffffff',
+                        borderWidth: 2,
+                        hoverOffset: 10
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    cutout: '60%',
+                    plugins: {
+                        legend: {
+                            display: false
+                        },
+                        datalabels: {
+                            color: '#ffffff',
+                            font: {
+                                weight: 'bold',
+                                size: 14
+                            },
+                            formatter: (value, ctx) => {
+                                let sum = 0;
+                                let dataArr = ctx.chart.data.datasets[0].data;
+                                dataArr.map(data => {
+                                    sum += data;
+                                });
+                                let percentage = (value * 100 / sum).toFixed(0) + "%";
+                                return percentage;
+                            }
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                                    const percentage = Math.round((context.raw / total) * 100);
+                                    return `${context.label}: ${context.raw} (${percentage}%)`;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
         }
         
         // Update chart with new data
@@ -381,7 +511,9 @@
             const labels = [];
             const temperatures = [];
             
-            data.slice(-20).forEach(record => {
+            // Take the last 20 entries but reverse them for the chart
+            // (charts typically go left to right, oldest to newest)
+            data.slice(0, 20).reverse().forEach(record => {
                 if (record.tempC !== null && record.tempC !== undefined) {
                     labels.push(new Date(record.timestamp).toLocaleTimeString());
                     temperatures.push(record.tempC);
@@ -391,6 +523,50 @@
             temperatureChart.data.labels = labels;
             temperatureChart.data.datasets[0].data = temperatures;
             temperatureChart.update();
+            
+            // Update pie chart
+            updateStatusChart(data);
+        }
+        
+        // Update status chart with distribution data
+        function updateStatusChart(data) {
+            // Count occurrences of each status
+            const statusCounts = {
+                'normal': 0,
+                'fever': 0
+            };
+            
+            data.forEach(record => {
+                const status = record.status || 'normal';
+                if (statusCounts.hasOwnProperty(status)) {
+                    statusCounts[status]++;
+                } else {
+                    // Handle any other status as 'normal'
+                    statusCounts['normal']++;
+                }
+            });
+            
+            // Calculate total for percentage calculation
+            const total = statusCounts['normal'] + statusCounts['fever'];
+            
+            // Update chart data
+            statusChart.data.datasets[0].data = [
+                statusCounts['normal'],
+                statusCounts['fever']
+            ];
+            
+            // Update chart labels with percentages
+            if (total > 0) {
+                statusChart.data.labels = [
+                    `Normal ${Math.round((statusCounts['normal'] / total) * 100)}%`,
+                    `Fever ${Math.round((statusCounts['fever'] / total) * 100)}%`
+                ];
+            } else {
+                statusChart.data.labels = ['Normal', 'Fever'];
+            }
+            
+            // Update chart
+            statusChart.update();
         }
         
         // Update chart with single reading
@@ -479,19 +655,93 @@
             temperatureChart.update();
         }
         
+        // Filter data based on status
+        function filterData(data, filterValue) {
+            if (filterValue === 'all') {
+                return data;
+            }
+            return data.filter(record => (record.status || 'normal') === filterValue);
+        }
+
+        // Show delete confirmation modal
+        function showDeleteModal(id) {
+            recordToDelete = id;
+            const deleteModal = document.getElementById('deleteModal');
+            deleteModal.style.display = 'flex';
+        }
+
+        // Hide delete confirmation modal
+        function hideDeleteModal() {
+            const deleteModal = document.getElementById('deleteModal');
+            deleteModal.style.display = 'none';
+            recordToDelete = null;
+        }
+
+        // Confirm delete action
+        async function confirmDelete() {
+            if (!recordToDelete) return;
+            
+            try {
+                const response = await fetch(`/api/temps/${recordToDelete}`, {
+                    method: 'DELETE'
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    // Remove the row from the table
+                    const row = document.querySelector(`button[onclick="showDeleteModal('${recordToDelete}')"]`).closest('tr');
+                    if (row) {
+                        row.style.animation = 'fadeOut 0.3s ease forwards';
+                        setTimeout(() => {
+                            row.remove();
+                            // Refresh data to update charts and stats
+                            fetchRecords();
+                        }, 300);
+                    }
+                    hideDeleteModal();
+                } else {
+                    hideDeleteModal();
+                    alert('Failed to delete record: ' + result.error);
+                }
+            } catch (error) {
+                console.error('Error deleting record:', error);
+                hideDeleteModal();
+                alert('Failed to delete record. Please try again.');
+            }
+        }
+
+        // Delete a record (updated to use modal)
+        function deleteRecord(id) {
+            showDeleteModal(id);
+        }
+
         // Initialize dashboard
         function initDashboard() {
             // Initialize chart
             initChart();
             
-            // Add event listeners
-            document.getElementById('refreshBtn').addEventListener('click', fetchRecords);
-            document.getElementById('clearBtn').addEventListener('click', clearDisplay);
+            // Add event listener for filter changes
+            document.getElementById('statusFilter').addEventListener('change', () => {
+                const filterValue = document.getElementById('statusFilter').value;
+                const filteredData = filterData(currentData, filterValue);
+                updateTable(filteredData);
+                
+                // Update record count
+                const recordCount = document.getElementById('recordCount');
+                recordCount.textContent = `${filteredData.length} records`;
+            });
             
-            // Close modal when clicking outside
+            // Close modals when clicking outside
             document.getElementById('errorModal').addEventListener('click', (e) => {
                 if (e.target.id === 'errorModal') {
                     hideErrorModal();
+                }
+            });
+            
+            document.getElementById('deleteModal').addEventListener('click', (e) => {
+                if (e.target.id === 'deleteModal') {
+                    hideDeleteModal();
                 }
             });
             
@@ -503,6 +753,7 @@
                 }
                 if (e.key === 'Escape') {
                     hideErrorModal();
+                    hideDeleteModal();
                 }
             });
             
@@ -530,6 +781,82 @@
         
         // Expose functions globally for onclick handlers
         window.hideErrorModal = hideErrorModal;
+        
+        // Show alert notification for new readings
+        function showAlert(reading) {
+            // Create alert container if it doesn't exist
+            let alertContainer = document.getElementById('alertContainer');
+            if (!alertContainer) {
+                alertContainer = document.createElement('div');
+                alertContainer.id = 'alertContainer';
+                alertContainer.className = 'alert-container';
+                document.body.appendChild(alertContainer);
+            }
+            
+            // Create alert element
+            const alert = document.createElement('div');
+            alert.className = 'alert-notification';
+            
+            // Determine alert type and message based on temperature
+            if (reading.status === 'fever') {
+                alert.classList.add('alert-danger');
+                alert.innerHTML = `
+                    <div class="alert-icon">
+                        <i class="fas fa-exclamation-triangle"></i>
+                    </div>
+                    <div class="alert-content">
+                        <h4>Elevated Temperature Detected!</h4>
+                        <p>Device: ${reading.deviceId || 'Unknown'} | 
+                           Temperature: ${reading.tempC ? reading.tempC.toFixed(1) + '°C' : 'N/A'} | 
+                           Status: ${reading.status || 'Unknown'}</p>
+                    </div>
+                    <div class="alert-close">
+                        <i class="fas fa-times"></i>
+                    </div>
+                `;
+            } else {
+                alert.classList.add('alert-success');
+                alert.innerHTML = `
+                    <div class="alert-icon">
+                        <i class="fas fa-check-circle"></i>
+                    </div>
+                    <div class="alert-content">
+                        <h4>Normal Temperature Reading</h4>
+                        <p>Device: ${reading.deviceId || 'Unknown'} | 
+                           Temperature: ${reading.tempC ? reading.tempC.toFixed(1) + '°C' : 'N/A'} | 
+                           Status: ${reading.status || 'Normal'}</p>
+                    </div>
+                    <div class="alert-close">
+                        <i class="fas fa-times"></i>
+                    </div>
+                `;
+            }
+            
+            // Add to container
+            alertContainer.appendChild(alert);
+            
+            // Add close functionality
+            const closeBtn = alert.querySelector('.alert-close');
+            closeBtn.addEventListener('click', () => {
+                alert.classList.add('alert-hide');
+                setTimeout(() => {
+                    alert.remove();
+                }, 300);
+            });
+            
+            // Auto-remove after 5 seconds
+            setTimeout(() => {
+                if (alert.parentNode) {
+                    alert.classList.add('alert-hide');
+                    setTimeout(() => {
+                        if (alert.parentNode) {
+                            alert.remove();
+                        }
+                    }, 300);
+                }
+            }, 5000);
+        }
+
     </script>
 </body>
 </html>

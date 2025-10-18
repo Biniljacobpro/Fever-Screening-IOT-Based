@@ -21,7 +21,10 @@ const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/feverd
 // Connect to MongoDB
 mongoose.connect(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true })
   .then(()=> console.log('MongoDB connected'))
-  .catch(err => console.error('MongoDB connect error:', err));
+  .catch(err => {
+    console.error('MongoDB connect error:', err);
+    console.log('Continuing without MongoDB connection for UI testing');
+  });
 
 // API: POST reading
 app.post('/api/temps', async (req, res) => {
@@ -42,7 +45,25 @@ app.post('/api/temps', async (req, res) => {
 app.get('/api/temps', async (req, res) => {
   const limit = parseInt(req.query.limit) || 100;
   const readings = await Reading.find().sort({ timestamp: -1 }).limit(limit);
-  res.json(readings.reverse()); // oldest -> newest
+  // Remove the .reverse() to keep newest first
+  res.json(readings); // newest -> oldest
+});
+
+// API: DELETE a reading by ID
+app.delete('/api/temps/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await Reading.findByIdAndDelete(id);
+    
+    if (!result) {
+      return res.status(404).json({ success: false, error: 'Reading not found' });
+    }
+    
+    res.status(200).json({ success: true, message: 'Reading deleted successfully' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // Socket.io connection
